@@ -17,6 +17,8 @@ mod task;
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::syscall::process::{sys_get_time, TaskInfo};
+use crate::syscall::TimeVal;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -51,13 +53,11 @@ lazy_static! {
     /// Global variable: TASK_MANAGER
     pub static ref TASK_MANAGER: TaskManager = {
         let num_app = get_num_app();
-        let mut tasks = [TaskControlBlock {
-            task_cx: TaskContext::zero_init(),
-            task_status: TaskStatus::UnInit,
-        }; MAX_APP_NUM];
+        // init task vec with default value
+        let mut tasks = [TaskControlBlock::new(); MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
-            task.task_status = TaskStatus::Ready;
+            task.task_status = TaskStatus::Init;
         }
         TaskManager {
             num_app,
@@ -79,6 +79,11 @@ impl TaskManager {
     fn run_first_task(&self) -> ! {
         let mut inner = self.inner.exclusive_access();
         let task0 = &mut inner.tasks[0];
+
+        // 对于现在没有 idle task 的情况，要在 run_first_task 之中单独
+        // 构造第一个运行的 task 的启动时间
+        sys_get_time(&mut task0.start_up_time as *mut TimeVal, usize::default());
+
         task0.task_status = TaskStatus::Running;
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
         drop(inner);
@@ -107,20 +112,37 @@ impl TaskManager {
     /// Find next task to run and return task id.
     ///
     /// In this case, we only return the first `Ready` task in task list.
-    fn find_next_task(&self) -> Option<usize> {
+    /// 现在 return type 修改为了下一个 task 在 TASK_MANAGER 之中的索引还有
+    /// 该 Task 现在的状态，可能为 `Ready` 或 `Init`, 我们借助这个来判断 task 是不是第一
+    /// 次运行，更新第一次运行的时间
+    fn find_next_task(&self) -> Option<(usize, TaskStatus)> {
         let inner = self.inner.exclusive_access();
         let current = inner.current_task;
+        // 循环遍历下一个应该运行的task，[liuzl note: 我感觉这个实现真的很有价值!]
         (current + 1..current + self.num_app + 1)
             .map(|id| id % self.num_app)
-            .find(|id| inner.tasks[*id].task_status == TaskStatus::Ready)
+            .find(|id| {
+                inner.tasks[*id].task_status == TaskStatus::Ready
+                    || inner.tasks[*id].task_status == TaskStatus::Init
+            })
+            .map(|id| (id, inner.tasks[id].task_status))
     }
 
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
-        if let Some(next) = self.find_next_task() {
+        if let Some((next, task_status)) = self.find_next_task() {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
+
+            // 设定下一个需要运行的 task 的相关信息
+            if task_status == TaskStatus::Init {
+                // 假如在这之前当前 task 一次都没有运行过，则设置启动时间
+                sys_get_time(
+                    &mut inner.tasks[next].start_up_time as *mut TimeVal,
+                    usize::default(),
+                );
+            }
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
@@ -134,6 +156,30 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    /// When current task use syscall, update the syscall_cnt array in it's TaskControlBlock
+    fn update_syscall_cnt(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].update_syscall_cnt(syscall_id);
+    }
+
+    /// Get information of current task
+    fn current_task_info(&self) -> TaskInfo {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+
+        let mut current_time = TimeVal::default();
+        sys_get_time(&mut current_time as *mut TimeVal, usize::default());
+
+        let current_task_ref = &inner.tasks[current];
+
+        TaskInfo::new(
+            current_task_ref.task_status,
+            current_task_ref.syscall_counter.clone(),
+            current_time - current_task_ref.start_up_time,
+        )
     }
 }
 
@@ -156,6 +202,18 @@ fn mark_current_suspended() {
 /// Change the status of current `Running` task into `Exited`.
 fn mark_current_exited() {
     TASK_MANAGER.mark_current_exited();
+}
+
+/// 2024年10月10日18:30:51
+/// update syscall_cnt in current task's TaskControlBlock
+pub fn update_syscall_cnt(syscall_id: usize) {
+    TASK_MANAGER.update_syscall_cnt(syscall_id);
+}
+
+/// 2024年10月10日23:03:58
+/// get information of current task
+pub fn current_task_info() -> TaskInfo {
+    TASK_MANAGER.current_task_info()
 }
 
 /// Suspend the current 'Running' task and run the next task in task list.
