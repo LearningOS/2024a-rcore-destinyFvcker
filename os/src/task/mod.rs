@@ -170,10 +170,10 @@ impl TaskManager {
         let inner = self.inner.exclusive_access();
         let current = inner.current_task;
 
+        let current_task_ref = &inner.tasks[current];
+
         let mut current_time = TimeVal::default();
         sys_get_time(&mut current_time as *mut TimeVal, usize::default());
-
-        let current_task_ref = &inner.tasks[current];
 
         TaskInfo::new(
             current_task_ref.task_status,

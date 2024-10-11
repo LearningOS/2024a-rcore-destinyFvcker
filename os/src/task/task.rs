@@ -39,12 +39,12 @@ impl TaskControlBlock {
 pub enum TaskStatus {
     /// uninitialized
     UnInit,
-    /// initialized, but never run
-    Init,
     /// ready to run
     Ready,
     /// running
     Running,
     /// exited
     Exited,
+    /// initialized, but never run
+    Init,
 }
