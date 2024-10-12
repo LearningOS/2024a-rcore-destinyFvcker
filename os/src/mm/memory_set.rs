@@ -71,6 +71,8 @@ impl MemorySet {
         self.areas.push(map_area);
     }
     /// Mention that trampoline is not collected by areas.
+    ///
+    /// 在加载用户应用程序和内核地址空间的时候都需要下面这个方法来映射跳板物理地址
     fn map_trampoline(&mut self) {
         self.page_table.map(
             VirtAddr::from(TRAMPOLINE).into(),
@@ -149,31 +151,43 @@ impl MemorySet {
         let mut memory_set = Self::new_bare();
         // map trampoline
         memory_set.map_trampoline();
+
         // map program headers of elf, with U flag
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
         let elf_header = elf.header;
+        // pt1：表示 ELF 文件头的第一部分（包含一些基础字段，如魔数、ELF 类型等）。
         let magic = elf_header.pt1.magic;
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
-        let ph_count = elf_header.pt2.ph_count();
-        let mut max_end_vpn = VirtPageNum(0);
+
+        // pt2：表示 ELF 文件头的第二部分（包含一些更详细的信息，如程序头表的偏移、入口地址、程序头的数量等）。
+        let ph_count = elf_header.pt2.ph_count(); // 获取程序头表的项数
+        let mut max_end_vpn = VirtPageNum(0); // 初始化一个虚拟页号，记录当前内存映射的最大结束地址
+
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
+            // 如果该程序头的类型是 Load，表示需要将该段加载到内存中
             if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+                // 获取该段的虚拟起始地址和结束地址
                 let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
                 let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
+                // 初始化段的映射权限，默认只有用户权限（U 标志）
                 let mut map_perm = MapPermission::U;
+                // 根据程序段的标志设置映射权限
                 let ph_flags = ph.flags();
                 if ph_flags.is_read() {
-                    map_perm |= MapPermission::R;
+                    map_perm |= MapPermission::R; // 可读
                 }
                 if ph_flags.is_write() {
-                    map_perm |= MapPermission::W;
+                    map_perm |= MapPermission::W; // 可写
                 }
                 if ph_flags.is_execute() {
-                    map_perm |= MapPermission::X;
+                    map_perm |= MapPermission::X; // 可执行
                 }
+                // 创建一个新的内存区域（MapArea），并将其映射到内存集中
                 let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
-                max_end_vpn = map_area.vpn_range.get_end();
+                max_end_vpn = map_area.vpn_range.get_end(); // 更新最大结束虚拟页号
+
+                // 将 ELF 文件中的这段数据加载到内存中
                 memory_set.push(
                     map_area,
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
@@ -287,7 +301,15 @@ impl MapArea {
             map_perm,
         }
     }
-    pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+    /// map one VirtPageNum to PhysPageNum in This MapArea
+    /// and register it to MemorySet's pagetable
+    ///
+    /// 注意：这个函数只应该在初始化 MapArea 时使用，并不会对在 MapArea
+    /// 之中存储的虚拟内存空间的起始虚拟页号和终止虚拟页号进行任何处理！
+    ///
+    /// 要真正对 MapArea 表示的地址范围进行修改，请使用在后面提供的 `shrink_to`
+    /// 和 `append_to` 方法
+    fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;
         match self.map_type {
             MapType::Identical => {
@@ -300,10 +322,11 @@ impl MapArea {
             }
         }
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        // PageTable::map -> PageTable::find_pte_create -> PhysPageNum::get_pte_array
         page_table.map(vpn, ppn, pte_flags);
     }
     #[allow(unused)]
-    pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+    fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         if self.map_type == MapType::Framed {
             self.data_frames.remove(&vpn);
         }
@@ -336,6 +359,8 @@ impl MapArea {
     }
     /// data: start-aligned but maybe with shorter length
     /// assume that all frames were cleared before
+    ///
+    /// 注意：待拷贝的数据一定要与页面对齐！
     pub fn copy_data(&mut self, page_table: &mut PageTable, data: &[u8]) {
         assert_eq!(self.map_type, MapType::Framed);
         let mut start: usize = 0;
@@ -381,6 +406,9 @@ bitflags! {
 
 /// Return (bottom, top) of a kernel stack in kernel space.
 pub fn kernel_stack_position(app_id: usize) -> (usize, usize) {
+    // 引用程序内核栈的大小由 config 模块之中 KERNEL_STACK_SIZE 给出
+    // 注意这里在每两个内核栈之间插入了了一个 PAGE_SIZE，这实际上是一个保护页面，
+    // 在多级页表之中不会存在它的映射，用来防止内核死递归导致的栈溢出
     let top = TRAMPOLINE - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
     let bottom = top - KERNEL_STACK_SIZE;
     (bottom, top)

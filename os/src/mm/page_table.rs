@@ -144,7 +144,19 @@ impl PageTable {
         self.find_pte(vpn).map(|pte| *pte)
     }
     /// get the token from the page table
+    /// RISC-V 64位架构中的 `satp` 寄存器（Supervisor Address Translation and Protection Register）的位布局:
+    ///
+    /// | 63 - 60: MODE | 59 - 44: ASID | 44 - 0: PPN |
+    ///
+    /// - **MODE (4 bits)**: 表示地址转换模式。包括 `Bare` (直接物理地址模式), `Sv39` (39位虚拟地址转换模式), 和 `Sv48` (48位虚拟地址转换模式)。
+    /// - **ASID (16 bits)**: Address Space Identifier，用于标识不同的地址空间，允许多个虚拟地址空间共存。
+    /// - **PPN (44 bits)**: Physical Page Number，指向页表的物理地址，存储页表的高44位地址。
+    ///
+    /// `satp` 寄存器是页表基地址及其翻译模式配置的核心部分，用于控制虚拟内存到物理内存的映射。
+    ///
+    /// 所以这个函数的作用就是将页表根目录的物理页号转换成一个符合 satp 寄存器规范的值
     pub fn token(&self) -> usize {
+        // 8usize << 60 -> set MODE = 8 -> open Sv39
         8usize << 60 | self.root_ppn.0
     }
 }
