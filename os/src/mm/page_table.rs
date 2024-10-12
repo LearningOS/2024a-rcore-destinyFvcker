@@ -1,5 +1,7 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
+use core::mem;
+
 use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -182,4 +184,51 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         start = end_va.into();
     }
     v
+}
+
+/// Write a value `T` to translated `ptr[u8]` through page table
+pub fn write_translated_buffer<T: Sized>(token: usize, ptr: *const u8, val: T) {
+    let buffers = translated_byte_buffer(token, ptr, mem::size_of::<T>());
+    let mut val_ptr = &val as *const _ as *const u8;
+    for buffer in buffers {
+        unsafe {
+            val_ptr.copy_to(buffer.as_mut_ptr(), buffer.len());
+            val_ptr = val_ptr.add(buffer.len());
+        }
+    }
+}
+
+/// Traslate&Copy a `ptr[u8]` array with len to value T
+pub fn translated_t<T: Sized>(token: usize, ptr: *const u8, len: usize) -> T {
+    let buffers = translated_byte_buffer(token, ptr, len);
+    let buffers: Vec<&[u8]> = buffers.iter().map(|slice| &**slice).collect();
+    convert_from_buffer(buffers)
+}
+
+/// Converts a collection of byte slices (`Vec<&[u8]>`) into a value of type `T`.
+///
+/// # Panics
+/// Panics if the total size of the combined byte slices is smaller than the size of type `T`.
+///
+/// # Safety
+/// This function performs an unsafe operation by interpreting raw bytes as a value of type `T`.
+/// The caller must ensure that the byte slices are correctly aligned and represent a valid `T` instance.
+pub fn convert_from_buffer<T>(buffers: Vec<&[u8]>) -> T {
+    let mut combined: Vec<u8> = Vec::new();
+
+    for buffer in buffers {
+        combined.extend_from_slice(buffer);
+    }
+
+    assert!(
+        combined.len() >= mem::size_of::<T>(),
+        "Buffer is too small to hold type T"
+    );
+
+    unsafe {
+        // 创建指向字节数组的指针
+        let ptr = combined.as_ptr() as *const T;
+        // 解引用指针，获取类型 T
+        ptr.read()
+    }
 }

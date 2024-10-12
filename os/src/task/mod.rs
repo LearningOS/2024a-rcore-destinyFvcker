@@ -15,7 +15,9 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{write_translated_buffer, MapPermission, VirtAddr, VirtPageNum};
 use crate::sync::UPSafeCell;
+use crate::syscall::process::{kernel_get_time, TaskInfo, TimeVal};
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -78,6 +80,13 @@ impl TaskManager {
     fn run_first_task(&self) -> ! {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
+
+        // update task start up time
+        kernel_get_time(
+            &mut next_task.start_up_time as *mut TimeVal,
+            usize::default(),
+        );
+
         next_task.task_status = TaskStatus::Running;
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
@@ -106,12 +115,16 @@ impl TaskManager {
     /// Find next task to run and return task id.
     ///
     /// In this case, we only return the first `Ready` task in task list.
-    fn find_next_task(&self) -> Option<usize> {
+    fn find_next_task(&self) -> Option<(usize, TaskStatus)> {
         let inner = self.inner.exclusive_access();
         let current = inner.current_task;
         (current + 1..current + self.num_app + 1)
             .map(|id| id % self.num_app)
-            .find(|id| inner.tasks[*id].task_status == TaskStatus::Ready)
+            .find(|id| {
+                inner.tasks[*id].task_status == TaskStatus::Ready
+                    || inner.tasks[*id].task_status == TaskStatus::Init
+            })
+            .map(|id| (id, inner.tasks[id].task_status))
     }
 
     /// Get the current 'Running' task's token.
@@ -136,9 +149,16 @@ impl TaskManager {
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
-        if let Some(next) = self.find_next_task() {
+        if let Some((next, status)) = self.find_next_task() {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
+
+            if status == TaskStatus::Init {
+                kernel_get_time(
+                    &mut inner.tasks[current].start_up_time as *mut TimeVal,
+                    usize::default(),
+                );
+            }
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
@@ -152,6 +172,111 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    /// Update syscall cnt of current running task
+    #[allow(unused)]
+    fn update_syscall_cnt(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+
+        inner.tasks[current].update_syscall_cnt(syscall_id);
+    }
+
+    /// Get task info of current running task
+    #[allow(unused)]
+    fn get_task_info(&self) -> TaskInfo {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+
+        let current_task_ref = &inner.tasks[current];
+
+        let mut current_time = TimeVal::default();
+        kernel_get_time(&mut current_time as *mut TimeVal, usize::default());
+
+        TaskInfo::new(
+            current_task_ref.task_status,
+            &current_task_ref.syscall_cnt,
+            current_time - current_task_ref.start_up_time,
+        )
+    }
+
+    /// Write a value to current running task's memory space
+    fn write_to_cur<T: Sized>(&self, user_ptr: *mut T, val: T) {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+
+        write_translated_buffer(
+            inner.tasks[current].memory_set.token(),
+            user_ptr as *const u8,
+            val,
+        );
+    }
+
+    /// Checks if there is a memory conflict in the range specified by the `start` and `end` virtual page numbers.
+    ///
+    /// # Arguments
+    /// - `start` - The starting virtual page number of the memory range to check.
+    /// - `end` - The ending virtual page number of the memory range to check.
+    ///
+    /// # Returns
+    /// - `true` if there is a conflict in the memory range, otherwise `false`.
+    pub fn is_conflict(&self, start: VirtPageNum, end: VirtPageNum) -> bool {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &inner.tasks[current];
+
+        task.memory_set.is_conflict(start, end)
+    }
+
+    /// Checks if the virtual memory manager (VMM) has mapped the specified memory range.
+    ///
+    /// # Arguments
+    /// - `start` - The starting virtual page number of the memory range.
+    /// - `end` - The ending virtual page number of the memory range.
+    ///
+    /// # Returns
+    /// - A non-negative value if the memory range is mapped by the VMM, otherwise a negative value.
+    pub fn is_vmm_mapped(&self, start: VirtPageNum, end: VirtPageNum) -> isize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &inner.tasks[current];
+
+        task.memory_set.is_vmm_mapped(start, end)
+    }
+
+    /// Allocates memory in the specified range and maps it with the given permissions.
+    ///
+    /// # Arguments
+    /// - `start` - The starting virtual address of the memory range to allocate.
+    /// - `end` - The ending virtual address of the memory range to allocate.
+    /// - `port` - The memory access permissions for the allocated range.
+    ///
+    /// # Description
+    /// This function allocates a framed memory area for the specified range and sets the given access permissions.
+    pub fn alloc_mm(&self, start: VirtAddr, end: VirtAddr, port: MapPermission) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &mut inner.tasks[current];
+
+        task.memory_set.insert_framed_area(start, end, port);
+    }
+
+    /// Deallocates the memory in the specified range and optionally considers crossing boundaries.
+    ///
+    /// # Arguments
+    /// - `start_va` - The starting virtual page number of the memory range to deallocate.
+    /// - `end_va` - The ending virtual page number of the memory range to deallocate.
+    /// - `is_cross` - A flag indicating whether the range crosses a boundary (non-zero if true).
+    ///
+    /// # Description
+    /// This function frees the memory in the specified range and handles crossing page boundaries based on the `is_cross` flag.
+    pub fn dealloc_mm(&self, start_va: VirtPageNum, end_va: VirtPageNum, is_cross: isize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &mut inner.tasks[current];
+
+        task.memory_set.free(start_va, end_va, is_cross as usize);
     }
 }
 
@@ -191,6 +316,21 @@ pub fn exit_current_and_run_next() {
 /// Get the current 'Running' task's token.
 pub fn current_user_token() -> usize {
     TASK_MANAGER.get_current_token()
+}
+
+/// Update the current 'Running' task's syscall_cnt
+pub fn update_current_syscall_cnt(syscall_id: usize) {
+    TASK_MANAGER.update_syscall_cnt(syscall_id);
+}
+
+/// Get the current 'Running' task's TaskInfo
+pub fn get_current_taskinfo() -> TaskInfo {
+    TASK_MANAGER.get_task_info()
+}
+
+/// Write a value to current running task's memory spac
+pub fn write_to_cur<T: Sized>(user_ptr: *mut T, val: T) {
+    TASK_MANAGER.write_to_cur(user_ptr, val);
 }
 
 /// Get the current 'Running' task's trap contexts.
