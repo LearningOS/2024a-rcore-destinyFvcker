@@ -39,7 +39,7 @@ impl Sub for TimeVal {
     /// return type's unit is ms
     fn sub(self, rhs: Self) -> Self::Output {
         let self_ms = (self.sec * 1_000_000 + self.usec) / 1_000;
-        let rhs_ms = (rhs.sec * 1_000_000 + self.usec) / 1_000;
+        let rhs_ms = (rhs.sec * 1_000_000 + rhs.usec) / 1_000;
 
         self_ms - rhs_ms
     }
@@ -47,6 +47,7 @@ impl Sub for TimeVal {
 
 /// Task information
 #[allow(dead_code)]
+#[derive(Debug)]
 pub struct TaskInfo {
     /// Task status in it's life cycle
     status: TaskStatus,
@@ -93,9 +94,9 @@ pub fn kernel_get_time(ts: *mut TimeVal, _tz: usize) {
     }
 }
 
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
+/// Get time with second and microsecond
+/// reimplement it with virtual memory management.
+/// [`TimeVal`] can be splitted by two pages ?
 pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
     let us = get_time_us();
@@ -107,9 +108,9 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     0
 }
 
-/// YOUR JOB: Finish sys_task_info to pass testcases
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TaskInfo`] is splitted by two pages ?
+/// Finish sys_task_info to pass testcases
+/// reimplement it with virtual memory management.
+/// [`TaskInfo`] is splitted by two pages ?
 pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
     trace!("kernel: sys_task_info NOT IMPLEMENTED YET!");
     let task_info = get_current_taskinfo();

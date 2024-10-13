@@ -1,4 +1,6 @@
 //! Types related to task management
+use core::fmt::Debug;
+
 use super::TaskContext;
 use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::mm::{
@@ -130,4 +132,16 @@ pub enum TaskStatus {
     Exited,
     /// initialized, but never ran
     Init,
+}
+
+impl Debug for TaskStatus {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnInit => write!(f, "status: Ready"),
+            Self::Ready => write!(f, "status: Ready"),
+            Self::Running => write!(f, "status: Running"),
+            Self::Exited => write!(f, "status: Exited"),
+            Self::Init => write!(f, "status: Init"),
+        }
+    }
 }

@@ -194,6 +194,16 @@ impl TaskManager {
         let mut current_time = TimeVal::default();
         kernel_get_time(&mut current_time as *mut TimeVal, usize::default());
 
+        println!("[Kernel] current_time = {:?}", current_time);
+        println!(
+            "[Kernel] start up time = {:?}",
+            current_task_ref.start_up_time
+        );
+        println!(
+            "[Kernel] running time = {:?}",
+            current_time - current_task_ref.start_up_time
+        );
+
         TaskInfo::new(
             current_task_ref.task_status,
             &current_task_ref.syscall_cnt,
