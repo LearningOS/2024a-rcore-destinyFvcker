@@ -220,6 +220,9 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
 }
 
 /// An abstraction over a buffer passed from user space to kernel space
+///
+/// 在是线上实际上就是将调用 translated_byte_buffer 获得的包含多个切片的 Vec 进
+/// 一步包装起来
 pub struct UserBuffer {
     /// A list of buffers
     pub buffers: Vec<&'static mut [u8]>,

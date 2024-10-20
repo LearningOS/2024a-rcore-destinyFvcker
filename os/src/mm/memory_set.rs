@@ -159,6 +159,7 @@ impl MemorySet {
             ),
             None,
         );
+        // 在创建内核地址空间的时候需要建立页表映射
         info!("mapping memory-mapped registers");
         for pair in MMIO {
             memory_set.push(

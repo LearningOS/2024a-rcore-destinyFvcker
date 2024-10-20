@@ -1,3 +1,9 @@
+//! 站在用户的角度看来，在一个进程中可以使用多种不同的标志来打开一个文件，这会影响到打开的这个文件可以用何种方式被访问。
+//! 此外，在连续调用 sys_read/write 读写一个文件的时候，我们知道进程中也存在着一个文件读写的当前偏移量，
+//! 它也随着文件读写的进行而被不断更新。这些用户视角中的文件系统抽象特征需要内核来实现，与进程有很大的关系，
+//! 而 easy-fs 文件系统不必涉及这些与进程结合紧密的属性。因此，我们需要将 easy-fs 提供的 Inode 加上上述信息，
+//! 进一步封装为 OS 中的索引节点 OSInode
+//!
 //! `Arc<Inode>` -> `OSInodeInner`: In order to open files concurrently
 //! we need to wrap `Inode` into `Arc`,but `Mutex` in `Inode` prevents
 //! file systems from being accessed simultaneously
@@ -17,6 +23,8 @@ use lazy_static::*;
 /// inode in memory
 /// A wrapper around a filesystem inode
 /// to implement File trait atop
+///
+/// 表示进程之中一个被打开的常规文件或目录
 pub struct OSInode {
     readable: bool,
     writable: bool,

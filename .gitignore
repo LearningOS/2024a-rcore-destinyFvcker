@@ -16,5 +16,8 @@ tools/
 pushall.sh
 *.bak
 
+# for MacOS
+.DS_Store
+
 user/
 ci-user/

@@ -1,3 +1,12 @@
+//! 服务于文件相关系统调用的索引节点层的代码在 vfs.rs 中。
+//!
+//! EasyFileSystem 实现了磁盘布局并能够将磁盘块有效的管理起来。但是对于文件系统的使用者而言，
+//! 他们往往不关心磁盘布局是如何实现的，而是更希望能够直接看到目录树结构中逻辑上的文件和目录。
+//! 为此需要设计索引节点 Inode 暴露给文件系统的使用者，让他们能够直接对文件和目录进行操作。
+//!
+//! Inode 和 DiskInode 的区别从它们的名字中就可以看出：
+//! DiskInode 放在磁盘块中比较固定的位置，而 Inode 是放在内存中的记录文件索引节点信息的数据结构。
+
 use super::{
     block_cache_sync_all, get_block_cache, BlockDevice, DirEntry, DiskInode, DiskInodeType,
     EasyFileSystem, DIRENT_SZ,
@@ -6,10 +15,11 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::{Mutex, MutexGuard};
+
 /// Virtual filesystem layer over easy-fs
 pub struct Inode {
-    block_id: usize,
-    block_offset: usize,
+    block_id: usize,     // 对应的DiskInode保存在磁盘上的块号
+    block_offset: usize, // 对应的DiskInode保存在磁盘上的块内偏移量
     fs: Arc<Mutex<EasyFileSystem>>,
     block_device: Arc<dyn BlockDevice>,
 }
@@ -30,18 +40,21 @@ impl Inode {
         }
     }
     /// Call a function over a disk inode to read it
+    /// 主要用于简化对于Inode对应的磁盘上的DiskInode的访问流程
     fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
         get_block_cache(self.block_id, Arc::clone(&self.block_device))
             .lock()
             .read(self.block_offset, f)
     }
     /// Call a function over a disk inode to modify it
+    /// 主要用于简化对于Inode对应的磁盘上的DiskInode的访问流程
     fn modify_disk_inode<V>(&self, f: impl FnOnce(&mut DiskInode) -> V) -> V {
         get_block_cache(self.block_id, Arc::clone(&self.block_device))
             .lock()
             .modify(self.block_offset, f)
     }
     /// Find inode under a disk inode by name
+    /// 返回目标文件的 Inode Id
     fn find_inode_id(&self, name: &str, disk_inode: &DiskInode) -> Option<u32> {
         // assert it is a directory
         assert!(disk_inode.is_dir());
@@ -58,11 +71,21 @@ impl Inode {
         }
         None
     }
+
+    // 包括find在内，所有暴露给文件系统的使用者的文件系统操作（还有接下来要介绍的几种），
+    // 全程都需要持有 EasyFileSystem 的互斥锁（相对而言，文件系统内部的操作，如之前的Inode::new
+    // 还是上面的 find_inode_id，都是嘉定在已经持有efs锁的情况下才被调用的，因此它们不应尝试获取
+    // 锁）。这能够保证在多核情况下，同时最多只能有一个核在进行文件系统的相关操作。
+    //
+    // 这样也许会带来一些不必要的性能损失，但我们目前暂时先这样做。如果我们在这里加锁的话，
+    // 其实就能够保证块缓存的互斥访问了。
+
     /// Find inode under current inode by name
     pub fn find(&self, name: &str) -> Option<Arc<Inode>> {
         let fs = self.fs.lock();
         self.read_disk_inode(|disk_inode| {
             self.find_inode_id(name, disk_inode).map(|inode_id| {
+                // 在这里最要注意的一点是 inode_id 不是 block_id，它们之间的粒度是不一样的
                 let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
                 Arc::new(Self::new(
                     block_id,

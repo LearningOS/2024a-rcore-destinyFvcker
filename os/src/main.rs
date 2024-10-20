@@ -73,8 +73,11 @@ pub fn rust_main() -> ! {
     trap::init();
     trap::enable_timer_interrupt();
     timer::set_next_trigger();
-    fs::list_apps();
+    fs::list_apps(); // 在ch5之中这里是 loader::list_apps();
     task::add_initproc();
     task::run_tasks();
     panic!("Unreachable in rust_main!");
 }
+
+// 非常值得注意的一点是，在有了文件系统之后，我们再也不需要lorder.rs模块了
+// 这个模块现在由fs模块进行替代

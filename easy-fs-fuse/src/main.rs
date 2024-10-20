@@ -49,6 +49,9 @@ fn easy_fs_pack() -> std::io::Result<()> {
     let src_path = matches.value_of("source").unwrap();
     let target_path = matches.value_of("target").unwrap();
     println!("src_path = {}\ntarget_path = {}", src_path, target_path);
+
+    // 第一步首先需要打开块设备，这里通过创建一个 fs.img 来新建一个虚拟块设备，并将它的容量设置为 8192 个
+    // 块也就是 4MiB。在创建的时候需要将其的访问权限设置为可读可写
     let block_file = Arc::new(BlockFile(Mutex::new({
         let f = OpenOptions::new()
             .read(true)
@@ -58,6 +61,10 @@ fn easy_fs_pack() -> std::io::Result<()> {
         f.set_len(16 * 2048 * 512).unwrap();
         f
     })));
+
+    // 由于我们在进行测试，需要初始化测试环境，因此在虚拟块设备 block_file 上初始化 easy-fs 文件系统，这会将 block_file
+    // 用于放置 easy-fs 镜像的前 4096 个块上的数据覆盖，然后变成仅有一个根目录的初始文件系统。如果块设备上已经放置了
+    // 一个合法的 easy-fs 镜像，则我们不必这样做。
     // 16MiB, at most 4095 files
     let efs = EasyFileSystem::create(block_file, 16 * 2048, 1);
     let root_inode = Arc::new(EasyFileSystem::root_inode(&efs));
