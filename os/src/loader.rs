@@ -28,7 +28,9 @@ pub fn get_app_data(app_id: usize) -> &'static [u8] {
 }
 
 lazy_static! {
-    ///All of app's name
+    /// All of app's name
+    ///
+    /// 按照顺序将所有应用的名字保存在内存中：
     static ref APP_NAMES: Vec<&'static str> = {
         let num_app = get_num_app();
         extern "C" {

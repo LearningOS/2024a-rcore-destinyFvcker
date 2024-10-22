@@ -104,12 +104,12 @@ pub fn rust_main() -> ! {
     kernel_log_info();
     mm::init();
     mm::remap_test();
-    task::add_initproc();
+    task::add_initproc(); // 在 ch4 之中根本就没有这个调用
     println!("after initproc!");
     trap::init();
     trap::enable_timer_interrupt();
     timer::set_next_trigger();
     loader::list_apps();
-    task::run_tasks();
+    task::run_tasks(); // 在 branch ch4 之中，这里的处理是 task::run_first_task();
     panic!("Unreachable in rust_main!");
 }

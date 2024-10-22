@@ -9,6 +9,20 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
+// in ch4:
+// The task control block (TCB) of a task.
+// pub struct TaskControlBlock {
+//     pub task_cx: TaskContext,
+//     pub task_status: TaskStatus,
+//     pub memory_set: MemorySet,
+//     pub trap_cx_ppn: PhysPageNum,
+//     pub base_size: usize,
+//     pub heap_bottom: usize,
+//     pub program_brk: usize,
+//     pub syscall_cnt: [u32; MAX_SYSCALL_NUM],
+//     pub start_up_time: TimeVal,
+// }
+
 /// Task control block structure
 ///
 /// Directly save the contents that will not change during running

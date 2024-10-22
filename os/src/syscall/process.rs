@@ -78,8 +78,18 @@ pub fn sys_exec(path: *const u8) -> isize {
 
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
+///
+/// sys_waitpid 是一个立即返回的系统调用，它的返回值语义是：如果当前的进程不存在一个进程 ID
+/// 为 pid（pid==-1 或 pid > 0）的子进程，则返回 -1；如果存在一个进程 ID 为 pid 的僵尸子进程，
+/// 则正常回收并返回子进程的 pid，并更新系统调用的退出码参数为 exit_code 。这里还有一个 -2 的返回值，
+/// 它的含义是子进程还没退出，通知用户库 user_lib （是实际发出系统调用的地方），这样用户库看到是 -2 后，
+/// 就进一步调用 sys_yield 系统调用，让当前父进程进入等待状态。
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
-    trace!("kernel::pid[{}] sys_waitpid [{}]", current_task().unwrap().pid.0, pid);
+    trace!(
+        "kernel::pid[{}] sys_waitpid [{}]",
+        current_task().unwrap().pid.0,
+        pid
+    );
     let task = current_task().unwrap();
     // find a child process
 
