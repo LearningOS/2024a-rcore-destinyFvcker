@@ -213,3 +213,46 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .unwrap()
         .get_mut()
 }
+
+// [liuzl 2024年10月26日11:23:24]
+// 实际上当我发现有上面这个 translated_refmut 函数之后，在ch4之中实现的下面这个三个函数都已经不需要了
+// 有了一个'static生命周期的全局引用，既可以读，又可以写。
+// 而且下面这些函数都多少涉及了一些所有权的转移，特别是convert_from_buffer方法，使用read()生成的变量是否
+// 涉及到所有权的转移？这里我确实有一些不明白。
+//
+// pub fn write_translated_buffer<T: Sized>(token: usize, ptr: *const u8, val: T) {
+//     let buffers = translated_byte_buffer(token, ptr, mem::size_of::<T>());
+//     let mut val_ptr = &val as *const _ as *const u8;
+//     for buffer in buffers {
+//         unsafe {
+//             val_ptr.copy_to(buffer.as_mut_ptr(), buffer.len());
+//             val_ptr = val_ptr.add(buffer.len());
+//         }
+//     }
+// }
+//
+// pub fn translated_t<T: Sized>(token: usize, ptr: *const u8, len: usize) -> T {
+//     let buffers = translated_byte_buffer(token, ptr, len);
+//     let buffers: Vec<&[u8]> = buffers.iter().map(|slice| &**slice).collect();
+//     convert_from_buffer(buffers)
+// }
+//
+// pub fn convert_from_buffer<T>(buffers: Vec<&[u8]>) -> T {
+//     let mut combined: Vec<u8> = Vec::new();
+
+//     for buffer in buffers {
+//         combined.extend_from_slice(buffer);
+//     }
+
+//     assert!(
+//         combined.len() >= mem::size_of::<T>(),
+//         "Buffer is too small to hold type T"
+//     );
+
+//     unsafe {
+//         创建指向字节数组的指针
+//         let ptr = combined.as_ptr() as *const T;
+//         解引用指针，获取类型 T
+//         ptr.read()
+//     }
+// }

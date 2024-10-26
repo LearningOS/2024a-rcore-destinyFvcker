@@ -21,7 +21,14 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::loader::get_app_data_by_name;
+use core::panic;
+
+use crate::{
+    config::BIG_STRIDE,
+    loader::get_app_data_by_name,
+    mm::translated_refmut,
+    syscall::{kernel_get_time, TaskInfo, TimeVal},
+};
 use alloc::sync::Arc;
 use lazy_static::*;
 pub use manager::{fetch_task, TaskManager};
@@ -32,8 +39,8 @@ pub use context::TaskContext;
 pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 pub use manager::add_task;
 pub use processor::{
-    current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
-    Processor,
+    current_task, current_trap_cx, current_user_token, run_tasks, schedule, set_proc_prio,
+    take_current_task, Processor,
 };
 /// Suspend the current 'Running' task and run the next task in task list.
 pub fn suspend_current_and_run_next() {
@@ -42,6 +49,7 @@ pub fn suspend_current_and_run_next() {
 
     // ---- access current TCB exclusively
     let mut task_inner = task.inner_exclusive_access();
+    task_inner.proc_stride += BIG_STRIDE / task_inner.proc_prio;
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
@@ -56,6 +64,10 @@ pub fn suspend_current_and_run_next() {
 
 /// pid of usertests app in make run TEST=1
 pub const IDLE_PID: usize = 0;
+
+// [liuzl 2024年10月26日10:31:36] 整个项目之中唯一对于Zombie状态的处理存在于下面的
+// 函数之中，那么我现在有一个问题：难道用户态程序在最后都要手动调用exit()函数来标记自己
+// 为僵尸进程吗？
 
 /// Exit the current 'Running' task and run the next task in task list.
 pub fn exit_current_and_run_next(exit_code: i32) {
@@ -119,4 +131,48 @@ lazy_static! {
 ///Add init process to the manager
 pub fn add_initproc() {
     add_task(INITPROC.clone());
+}
+
+/// Update syscall cnt of current running task
+pub fn update_syscall_cnt(syscall_id: usize) {
+    if let Some(task) = current_task() {
+        let mut inner = task.inner_exclusive_access();
+        inner.update_syscall_cnt(syscall_id);
+    } else {
+        panic!(
+            "Try to update current running task's syscall counter array, \
+                But there isn't any running task in Task Manager!"
+        )
+    }
+}
+
+/// Get current running task's status
+pub fn get_current_task_info(ti: *mut TaskInfo) {
+    if let Some(task) = current_task() {
+        let inner = task.inner_exclusive_access();
+        let task_info = inner.get_task_info();
+
+        let user_ptr = translated_refmut(inner.memory_set.token(), ti);
+        *user_ptr = task_info;
+    } else {
+        panic!(
+            "Try to get current running task info, \
+                But there isn't any running task in Task Manager!"
+        )
+    }
+}
+
+/// Get time for current tunning task
+pub fn get_time_task(ts: *mut TimeVal) {
+    if let Some(task) = current_task() {
+        let inner = task.inner_exclusive_access();
+        let mut sys_time = TimeVal::default();
+
+        kernel_get_time(&mut sys_time as *mut TimeVal, usize::default());
+
+        let user_ptr = translated_refmut(inner.memory_set.token(), ts);
+        *user_ptr = sys_time;
+    } else {
+        panic!("There isn't any running task!")
+    }
 }

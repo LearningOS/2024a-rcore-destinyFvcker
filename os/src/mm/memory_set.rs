@@ -1,5 +1,5 @@
 //! Implementation of [`MapArea`] and [`MemorySet`].
-use super::{frame_alloc, FrameTracker};
+use super::{alloc_check, alloc_mm, dealloc_check, dealloc_mm, frame_alloc, FrameTracker};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
@@ -35,6 +35,11 @@ pub struct MemorySet {
     page_table: PageTable,
     areas: Vec<MapArea>,
 }
+// [liuzl 2024年10月26日14:47:58]
+// 对于上面的这个areas，本来想要做一个整合操作的，也就是说相邻的两个MapArea整合成一个
+// MapArea，但是感觉从逻辑上有点问题，因为首先合并区间的算法主要的作用是合并重叠的区间
+// 但是在这里MapArea和MapArea之间根本不可能发生重叠，最多相邻，就算是相邻的话，可能这几个
+// MapArea都有不同的MapPermission或者MapType，实在不好进行区分和合并
 
 impl MemorySet {
     /// Create a new empty `MemorySet`.
@@ -81,6 +86,8 @@ impl MemorySet {
             map_area.copy_data(&mut self.page_table, data);
         }
         self.areas.push(map_area);
+        self.areas
+            .sort_by_key(|map_area| map_area.vpn_range.get_start());
     }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
@@ -300,7 +307,140 @@ impl MemorySet {
             false
         }
     }
+
+    /// detect whether a range ordered by user is conflict with assigned virtual memory
+    pub fn is_conflict(&self, start: VirtPageNum, end: VirtPageNum) -> Result<(), &'static str> {
+        for map_area in &self.areas {
+            if map_area
+                .vpn_range
+                .into_iter()
+                .any(|vpn| start <= vpn && vpn < end)
+            {
+                return Err("given address range conflict with mapped address range");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Checks whether the given address range is fully mapped
+    pub fn is_vmm_fully_mapped(
+        &self,
+        start: VirtPageNum,
+        end: VirtPageNum,
+    ) -> Result<CrossType, &'static str> {
+        let size = self.areas.len();
+        for (index, map_area) in self.areas.iter().enumerate() {
+            let start_vn = map_area.vpn_range.get_start();
+            let end_vn = map_area.vpn_range.get_end();
+
+            // 下面的操作建立在areas之中的MapArea是以start_vpn的大小升序排列的基础上
+            if start_vn <= start && start <= end_vn {
+                if end <= end_vn {
+                    // 没有跨越MapArea进行释放的情况，返回的枚举体之中包含了需要进行释放的
+                    // MapArea在Areas之中的索引号
+                    return Ok(CrossType::Sigle(index));
+                } else {
+                    // 可能出现跨越MapArea进行释放的情况，从index + 1开始向后遍历整个MapArea
+                    let mut pre_end = end_vn;
+                    let mut cross_cnt = 0;
+                    for j in index + 1..size {
+                        let start_vn = self.areas[j].vpn_range.get_start();
+                        let end_vn = self.areas[j].vpn_range.get_end();
+
+                        pre_end.step();
+
+                        if pre_end == start_vn {
+                            cross_cnt += 1;
+                            pre_end = end_vn;
+                        } else {
+                            break;
+                        }
+
+                        if end <= end_vn {
+                            break;
+                        }
+                    }
+
+                    if cross_cnt > 0 && end < pre_end {
+                        return Ok(CrossType::Multiple(index, cross_cnt));
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        Err("vmm range does't fully mapped!")
+    }
+
+    /// free mememory from start_va to end_va
+    pub fn free(&mut self, start: VirtPageNum, end: VirtPageNum, cross_type: CrossType) {
+        println!("[kernel] cross type = {:?}", cross_type);
+        match cross_type {
+            CrossType::Sigle(index) => {
+                let vpn_range = VPNRange::new(start, end);
+                for vpn in vpn_range {
+                    self.areas[index].unmap_one(&mut self.page_table, vpn);
+                }
+                self.areas.remove(index);
+            }
+            CrossType::Multiple(s_idx, _len) => {
+                let area1 = &mut self.areas[s_idx];
+                for vpn in VPNRange::new(start, area1.vpn_range.get_end()) {
+                    area1.unmap_one(&mut self.page_table, vpn);
+                }
+
+                let area2 = &mut self.areas[s_idx + 1];
+                for vpn in VPNRange::new(area2.vpn_range.get_start(), end) {
+                    area2.unmap_one(&mut self.page_table, vpn);
+                }
+            }
+        }
+    }
 }
+
+/// mmap systemcall implication
+#[allow(unused)]
+pub fn mmap(start: usize, len: usize, port: usize) -> Result<(), &'static str> {
+    let vpn_range = alloc_check(start, start + len, port)?;
+    let mut map_perm = MapPermission::U;
+    if port & 0x1 == 0x1 {
+        map_perm |= MapPermission::R;
+    }
+    if port & 0x2 == 0x2 {
+        map_perm |= MapPermission::W;
+    }
+    if port & 0x4 == 0x4 {
+        map_perm |= MapPermission::X;
+    }
+
+    alloc_mm(vpn_range.0, vpn_range.1, map_perm); // 这里绝逼有竞态条件的问题，看来rCore操作系统是真的简陋
+
+    Ok(())
+}
+
+/// munmap systemcall implication
+#[allow(unused)]
+pub fn munmap(start: usize, len: usize) -> Result<(), &'static str> {
+    let start_vpa = VirtAddr::from(start);
+    if !start_vpa.aligned() {
+        return Err("start virtual address must be aligned.");
+    }
+
+    let end_vpa = VirtAddr::from(start + len);
+
+    let start_vpn: VirtPageNum = start_vpa.floor();
+    let end_vpn: VirtPageNum = end_vpa.ceil();
+
+    // 检查是否要释放的地址空间横跨了没有映射的虚拟地址空间
+    let cross_type = dealloc_check(start_vpn, end_vpn)?;
+
+    dealloc_mm(start_vpn, end_vpn, cross_type);
+
+    Ok(())
+}
+
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
     vpn_range: VPNRange,
@@ -400,6 +540,11 @@ impl MapArea {
             current_vpn.step();
         }
     }
+    /// whether a maparea is empty
+    #[allow(unused)]
+    pub fn is_empty(&self) -> bool {
+        self.vpn_range.get_start() == self.vpn_range.get_end()
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -421,6 +566,12 @@ bitflags! {
         ///Accessible in U mode
         const U = 1 << 4;
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum CrossType {
+    Sigle(usize),
+    Multiple(usize, usize),
 }
 
 /// remap test in kernel space

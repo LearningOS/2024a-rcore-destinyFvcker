@@ -43,10 +43,17 @@ const SYSCALL_TASK_INFO: usize = 410;
 mod fs;
 mod process;
 
+use crate::task::update_syscall_cnt;
+pub use process::kernel_get_time;
+pub use process::{TaskInfo, TimeVal};
+
 use fs::*;
 use process::*;
+
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+    // update syscall cnt
+    update_syscall_cnt(syscall_id);
     match syscall_id {
         SYSCALL_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),

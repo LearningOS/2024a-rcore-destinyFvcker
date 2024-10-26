@@ -1,15 +1,16 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::syscall::{kernel_get_time, TaskInfo, TimeVal};
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
-// in ch4:
+// In ch4:
 // The task control block (TCB) of a task.
 // pub struct TaskControlBlock {
 //     pub task_cx: TaskContext,
@@ -62,6 +63,9 @@ pub struct TaskControlBlockInner {
     pub task_cx: TaskContext,
 
     /// Maintain the execution status of the current process
+    /// To represent Uninit status，using Option to wrap it: Option<TaskStatus>
+    /// 但是改起来实在太麻烦了！应该在rCore的设计之初就采用这种设计，现在还是采用在最后追加Init
+    /// 的方式吧
     pub task_status: TaskStatus,
 
     /// Application address space
@@ -77,11 +81,24 @@ pub struct TaskControlBlockInner {
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
 
-    /// Heap bottom
+    /// Heap bottom，表示堆内存的起始地址
     pub heap_bottom: usize,
 
-    /// Program break
-    pub program_brk: usize,
+    /// Program break，通表示堆的顶部（或者堆的结束地址），也就是分配给进程的可用堆内存
+    /// 的最高地址
+    pub program_brk: usize, // 跟踪堆的当前边界，以便任务在需要时正确管理内存分配和释放
+
+    /// Task syscall cnt array
+    pub syscall_cnt: [u32; MAX_SYSCALL_NUM],
+
+    /// Task start up time
+    pub start_up_time: TimeVal,
+
+    /// process's priocity
+    pub proc_prio: usize,
+
+    /// process's stride
+    pub proc_stride: usize,
 }
 
 impl TaskControlBlockInner {
@@ -98,6 +115,20 @@ impl TaskControlBlockInner {
     }
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
+    }
+    /// Update syscall counter array
+    pub fn update_syscall_cnt(&mut self, syscall_id: usize) {
+        self.syscall_cnt[syscall_id] += 1;
+    }
+    /// Get process status
+    pub fn get_task_info(&self) -> TaskInfo {
+        let mut time_now = TimeVal::default();
+        kernel_get_time(&mut time_now as *mut TimeVal, usize::default());
+        TaskInfo::new(
+            self.task_status,
+            self.syscall_cnt.clone(),
+            time_now - self.start_up_time.clone(),
+        )
     }
 }
 
@@ -125,13 +156,17 @@ impl TaskControlBlock {
                     trap_cx_ppn,
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                    task_status: TaskStatus::Ready,
+                    task_status: TaskStatus::UnInit,
                     memory_set,
                     parent: None,
                     children: Vec::new(),
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    syscall_cnt: [0; MAX_SYSCALL_NUM],
+                    start_up_time: TimeVal::default(),
+                    proc_prio: 16,
+                    proc_stride: 0,
                 })
             },
         };
@@ -198,13 +233,17 @@ impl TaskControlBlock {
                     trap_cx_ppn,
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                    task_status: TaskStatus::Ready,
+                    task_status: TaskStatus::UnInit,
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    syscall_cnt: parent_inner.syscall_cnt.clone(), // 这里在逻辑上是继承父进程的系统调用数量统计还是覆盖？
+                    start_up_time: TimeVal::default(),
+                    proc_prio: 16,
+                    proc_stride: 0,
                 })
             },
         });
@@ -218,6 +257,21 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// spawn a new process by elf_data provided by user
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let spawn_task_control_block = Arc::new(TaskControlBlock::new(elf_data));
+
+        let mut parent_inner = self.inner_exclusive_access();
+        parent_inner.children.push(spawn_task_control_block.clone());
+
+        let mut inner = spawn_task_control_block.inner_exclusive_access();
+        inner.parent = Some(Arc::downgrade(self));
+
+        drop(inner); // 这里为什么当时要写drop?
+                     // return
+        spawn_task_control_block
     }
 
     /// get pid of process
