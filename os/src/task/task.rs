@@ -2,9 +2,11 @@
 
 use super::id::TaskUserRes;
 use super::{kstack_alloc, KernelStack, ProcessControlBlock, TaskContext};
+use crate::sync::SemId;
 use crate::trap::TrapContext;
 use crate::{mm::PhysPageNum, sync::UPSafeCell};
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::cell::RefMut;
 
 /// Task control block structure
@@ -41,6 +43,12 @@ pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     /// It is set when active exit or execution error occurs
     pub exit_code: Option<i32>,
+
+    /// trace what resource that the thread is using
+    pub allocation: Vec<(SemId, isize)>,
+
+    /// trace what resource that the thread need
+    pub need: Vec<(SemId, usize)>,
 }
 
 impl TaskControlBlockInner {
@@ -75,6 +83,8 @@ impl TaskControlBlock {
                     task_cx: TaskContext::goto_trap_return(kstack_top),
                     task_status: TaskStatus::Ready,
                     exit_code: None,
+                    allocation: Vec::new(),
+                    need: Vec::new(),
                 })
             },
         }
