@@ -2,11 +2,13 @@
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
+use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::syscall::{kernel_get_time, TaskInfo, TimeVal};
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
@@ -81,7 +83,6 @@ pub struct TaskControlBlockInner {
     pub heap_bottom: usize,
     /// Heap bottom
 
-
     /// Program break
     pub program_brk: usize,
     /// Task syscall cnt array
@@ -119,6 +120,7 @@ impl TaskControlBlockInner {
             self.fd_table.push(None);
             self.fd_table.len() - 1
         }
+    }
     /// Update syscall counter array
     pub fn update_syscall_cnt(&mut self, syscall_id: usize) {
         self.syscall_cnt[syscall_id] += 1;
