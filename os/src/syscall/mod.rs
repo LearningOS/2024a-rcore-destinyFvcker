@@ -59,7 +59,8 @@ pub use process::kernel_get_time;
 use process::*;
 pub use process::{TaskInfo, TimeVal};
 
-use crate::{fs::Stat, task::update_syscall_cnt};
+use crate::task::update_syscall_cnt;
+use easy_fs::Stat;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {

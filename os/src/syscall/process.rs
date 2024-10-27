@@ -241,29 +241,27 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
-    // trace!(
-    //     "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
-    //     current_task().unwrap().pid.0
-    // );
-    // let token = current_user_token();
-    // let app_path = translated_str(token, path);
+pub fn sys_spawn(path: *const u8) -> isize {
+    trace!("kernel:pid[{}] sys_spawn", current_task().unwrap().pid.0);
 
-    // if let Some(data) = get_app_data_by_name(&app_path) {
-    //     let current_task = current_task().unwrap();
-    //     let spawn_task = current_task.spawn(data);
-    //     let pid = spawn_task.pid.0;
+    let token = current_user_token();
+    let app_path = translated_str(token, path);
 
-    //     let trap_cx = spawn_task.inner_exclusive_access().get_trap_cx();
-    //     trap_cx.x[10] = 0;
+    if let Some(app_inode) = open_file(app_path.as_str(), OpenFlags::RDONLY) {
+        let all_data = app_inode.read_all();
+        let current_task = current_task().unwrap();
+        let spawn_task = current_task.spawn(&all_data);
+        let pid = spawn_task.pid.0;
 
-    //     add_task(spawn_task);
+        let trap_cx = spawn_task.inner_exclusive_access().get_trap_cx();
+        trap_cx.x[10] = 0;
 
-    //     pid as isize
-    // } else {
-    //     -1
-    // }
-    -1
+        add_task(spawn_task);
+
+        pid as isize
+    } else {
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.

@@ -17,7 +17,7 @@ use crate::sync::UPSafeCell;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitflags::*;
-use easy_fs::{EasyFileSystem, Inode};
+use easy_fs::{EasyFileSystem, Inode, Stat};
 use lazy_static::*;
 
 /// inode in memory
@@ -163,4 +163,19 @@ impl File for OSInode {
         }
         total_write_size
     }
+    /// Get the stat view of a file
+    fn stat(&self, st: &mut Stat) {
+        let inner = self.inner.exclusive_access();
+        inner.inode.read_stat(st);
+    }
+}
+
+/// link
+pub fn inode_link(old_name: &str, new_name: &str) -> Result<(), &'static str> {
+    ROOT_INODE.link(old_name, new_name)
+}
+
+/// unlink
+pub fn inode_unlink(name: &str) -> Result<(), &str> {
+    ROOT_INODE.unlink(name)
 }

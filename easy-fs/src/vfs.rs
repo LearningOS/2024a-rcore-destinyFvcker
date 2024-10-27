@@ -14,6 +14,7 @@ use super::{
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use bitflags::bitflags;
 use spin::{Mutex, MutexGuard};
 
 /// Virtual filesystem layer over easy-fs
@@ -205,5 +206,178 @@ impl Inode {
             }
         });
         block_cache_sync_all();
+    }
+
+    /// Read stat from current inode
+    pub fn read_stat(&self, st: &mut Stat) {
+        let _fs = self.fs.lock();
+        self.read_disk_inode(|disk_inode| {
+            st.dev = 0;
+            st.ino = self.block_id as u64;
+            st.mode = if disk_inode.is_dir() {
+                StatMode::DIR
+            } else {
+                StatMode::FILE
+            };
+
+            st.nlink = disk_inode.nlink as u32;
+        });
+    }
+
+    /// Link a new dir entry to a file.
+    /// warn: this method must be called by dir inode.
+    pub fn link(&self, old_name: &str, new_name: &str) -> Result<(), &'static str> {
+        let mut fs = self.fs.lock();
+
+        let old_inode_id =
+            self.read_disk_inode(|root_inode| self.find_inode_id(old_name, root_inode));
+
+        if let Some(old_inode_id) = old_inode_id {
+            let (block_id, block_offset) = fs.get_disk_inode_pos(old_inode_id);
+
+            get_block_cache(block_id as usize, Arc::clone(&self.block_device))
+                .lock()
+                // Increase the `nlink` of target DiskInode
+                .modify(block_offset, |n: &mut DiskInode| n.nlink += 1);
+
+            // Insert `newname` into directory.
+            self.modify_disk_inode(|root_inode| {
+                let file_count = (root_inode.size as usize) / DIRENT_SZ;
+                let new_size = (file_count + 1) * DIRENT_SZ;
+                self.increase_size(new_size as u32, root_inode, &mut fs);
+                let dirent = DirEntry::new(new_name, old_inode_id);
+                root_inode.write_at(
+                    file_count * DIRENT_SZ,
+                    dirent.as_bytes(),
+                    &self.block_device,
+                );
+            });
+
+            block_cache_sync_all();
+            Ok(())
+        } else {
+            Err("Can't find target file!")
+        }
+    }
+
+    /// unlink a dir entry of a file
+    pub fn unlink(&self, name: &str) -> Result<(), &'static str> {
+        let mut fs = self.fs.lock();
+
+        let mut inode_id: Option<u32> = None;
+        let mut v: Vec<DirEntry> = Vec::new();
+
+        // [destinyfvcker] 首先将要 unlink 的 inode_id 找到
+        // 这里再次注意一下，inode_id 是索引节点的编号，而不是索引块的编号！
+        self.modify_disk_inode(|root_inode| {
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            for i in 0..file_count {
+                let mut dirent = DirEntry::empty();
+                assert_eq!(
+                    root_inode.read_at(i * DIRENT_SZ, dirent.as_bytes_mut(), &self.block_device),
+                    DIRENT_SZ,
+                );
+                if dirent.name() != name {
+                    v.push(dirent);
+                } else {
+                    inode_id = Some(dirent.inode_id());
+                }
+            }
+        });
+
+        if let Some(inode_id) = inode_id {
+            // [destinyfvcker] 修改调用 unlink 方法的目录项（实际上就是根目录）
+            self.modify_disk_inode(|root_inode| {
+                let size = root_inode.size;
+                // 直接清空整个目录项，因为就现在的信息来说，没有能力直接找到对应的目录项并删除，
+                // 所以现在的逻辑就是，清空 + 恢复，唯独不恢复要 unlink 的目录项
+                //
+                // 返回值是一个数组，其中包含了这个目录项所有占用的块的块号.
+                let data_blocks_dealloc = root_inode.clear_size(&self.block_device);
+
+                // 检查一下是否其他的实现发生错误
+                assert!(data_blocks_dealloc.len() == DiskInode::total_blocks(size) as usize);
+
+                // 清除这些块的内容
+                for data_block in data_blocks_dealloc.into_iter() {
+                    fs.dealloc_data(data_block);
+                }
+
+                // 恢复
+                self.increase_size((v.len() * DIRENT_SZ) as u32, root_inode, &mut fs);
+                for (i, dirent) in v.iter().enumerate() {
+                    root_inode.write_at(i * DIRENT_SZ, dirent.as_bytes(), &self.block_device);
+                }
+            });
+
+            // Get position of old inode.
+            let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
+
+            // Find target `DiskInode` then modify!
+            get_block_cache(block_id as usize, Arc::clone(&self.block_device))
+                .lock()
+                .modify(block_offset, |n: &mut DiskInode| {
+                    // Decrease `nlink`.
+                    n.nlink -= 1;
+                    // If `nlink` is zero, free all data_block through `clear_size()`.
+                    if n.nlink == 0 {
+                        let size = n.size;
+                        let data_blocks_dealloc = n.clear_size(&self.block_device);
+                        assert!(
+                            data_blocks_dealloc.len() == DiskInode::total_blocks(size) as usize
+                        );
+                        for data_block in data_blocks_dealloc.into_iter() {
+                            fs.dealloc_data(data_block);
+                        }
+                    }
+                });
+
+            // Since we may have writed the cached block, we need to flush the cache.
+            block_cache_sync_all();
+            Ok(())
+        } else {
+            Err("Can't find target file!")
+        }
+    }
+}
+
+bitflags! {
+    /// The mode of a inode
+    /// whether a directory or a file
+    pub struct StatMode: u32 {
+        /// null
+        const NULL  = 0;
+        /// directory
+        const DIR   = 0o040000;
+        /// ordinary regular file
+        const FILE  = 0o100000;
+    }
+}
+
+/// The state of a inode(file)
+#[repr(C)]
+#[derive(Debug)]
+pub struct Stat {
+    /// ID of device containing file
+    pub dev: u64,
+    /// inode number
+    pub ino: u64,
+    /// file type and mod
+    pub mode: StatMode,
+    /// number of hard links
+    pub nlink: u32,
+    /// unused pad
+    pad: [u64; 7],
+}
+
+impl Default for Stat {
+    fn default() -> Self {
+        Self {
+            dev: Default::default(),
+            ino: Default::default(),
+            mode: StatMode::NULL,
+            nlink: Default::default(),
+            pad: Default::default(),
+        }
     }
 }

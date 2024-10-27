@@ -112,6 +112,9 @@ pub struct DiskInode {
     pub indirect2: u32,
     /// 索引节点的类型
     type_: DiskInodeType,
+    /// 记录文件的硬链接数（hard link count）
+    /// 也就是指向该文件节点（inode）的目录条目的数量
+    pub nlink: u8,
 }
 
 impl DiskInode {
@@ -123,6 +126,7 @@ impl DiskInode {
         self.indirect1 = 0;
         self.indirect2 = 0;
         self.type_ = type_;
+        self.nlink = 1;
     }
     /// Whether this inode is a directory
     pub fn is_dir(&self) -> bool {
