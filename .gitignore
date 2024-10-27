@@ -20,5 +20,8 @@ pushall.sh
 .vscode/*.log
 *.bak
 
+# For MacOS
+.DS_Store
+
 user/
 ci-user/
