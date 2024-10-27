@@ -8,6 +8,7 @@ use super::__switch;
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::sync::UPSafeCell;
+use crate::syscall::{kernel_get_time, TimeVal};
 use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
@@ -50,6 +51,25 @@ lazy_static! {
     pub static ref PROCESSOR: UPSafeCell<Processor> = unsafe { UPSafeCell::new(Processor::new()) };
 }
 
+// [liuzl 2024年10月26日10:28:00]
+// 可以看到这里和ch4之中的风格完全不一样了，在ch4之中，任务有几个不同的状态，而且无论任务的状态是
+// 什么样的，都会驻留在内存之中，不对，应该换一种说法，都会被调度器轮询到，但是实际上在ch5之中，所有
+// 进程控制块都被保存在 manager.rs 之中的一个 VecDeque 之中，当一个进程exit之后，它在 VecDeque
+// 之中就消失了，虽然它仍然驻留在内存之中，但是现在永远都不会轮询到它了。
+//
+// 比如说下一个函数的消失：
+// fn find_next_task(&self) -> Option<(usize, TaskStatus)> {
+//     let inner = self.inner.exclusive_access();
+//     let current = inner.current_task;
+//     (current + 1..current + self.num_app + 1)
+//         .map(|id| id % self.num_app)
+//         .find(|id| {
+//             inner.tasks[*id].task_status == TaskStatus::Ready
+//                 || inner.tasks[*id].task_status == TaskStatus::Init
+//         })
+//         .map(|id| (id, inner.tasks[id].task_status))
+// }
+
 ///The main part of process execution and scheduling
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
 pub fn run_tasks() {
@@ -60,7 +80,16 @@ pub fn run_tasks() {
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();
             let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
-            task_inner.task_status = TaskStatus::Running;
+
+            if task_inner.task_status == TaskStatus::UnInit {
+                kernel_get_time(
+                    &mut task_inner.start_up_time as *mut TimeVal,
+                    usize::default(),
+                );
+            }
+
+            task_inner.task_status = TaskStatus::Running; // Running 和 Ready 之间有一些区别啊
+
             // release coming task_inner manually
             drop(task_inner);
             // release coming task TCB manually
@@ -108,4 +137,12 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     unsafe {
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
+}
+
+/// set priority of current running process
+pub fn set_proc_prio(prio: usize) {
+    let current_task = current_task().unwrap();
+
+    let mut inner = current_task.inner_exclusive_access();
+    inner.proc_prio = prio;
 }

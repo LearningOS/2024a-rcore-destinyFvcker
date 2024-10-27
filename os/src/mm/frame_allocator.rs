@@ -55,7 +55,17 @@ impl StackFrameAllocator {
         self.end = r.0;
         // trace!("last {} Physical Frames.", self.end - self.current);
     }
+
+    #[allow(unused)]
+    fn is_enough(&self, ppn_count: usize) -> bool {
+        if self.end - self.current + self.recycled.len() < ppn_count {
+            return false;
+        } else {
+            return true;
+        }
+    }
 }
+
 impl FrameAllocator for StackFrameAllocator {
     fn new() -> Self {
         Self {
@@ -133,4 +143,10 @@ pub fn frame_allocator_test() {
     }
     drop(v);
     println!("frame_allocator_test passed!");
+}
+
+/// detect if the pysical memory is enough to allocate
+#[allow(unused)]
+pub fn is_enough(ppn_count: usize) -> bool {
+    FRAME_ALLOCATOR.exclusive_access().is_enough(ppn_count)
 }

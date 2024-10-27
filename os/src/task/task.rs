@@ -1,15 +1,28 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
-use crate::fs::{File, Stdin, Stdout};
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::syscall::{kernel_get_time, TaskInfo, TimeVal};
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
-use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+
+// In ch4:
+// The task control block (TCB) of a task.
+// pub struct TaskControlBlock {
+//     pub task_cx: TaskContext,
+//     pub task_status: TaskStatus,
+//     pub memory_set: MemorySet,
+//     pub trap_cx_ppn: PhysPageNum,
+//     pub base_size: usize,
+//     pub heap_bottom: usize,
+//     pub program_brk: usize,
+//     pub syscall_cnt: [u32; MAX_SYSCALL_NUM],
+//     pub start_up_time: TimeVal,
+// }
 
 /// Task control block structure
 ///
@@ -65,18 +78,31 @@ pub struct TaskControlBlockInner {
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
-
-    /// Heap bottom
     pub heap_bottom: usize,
+    /// Heap bottom
+
 
     /// Program break
     pub program_brk: usize,
+    /// Task syscall cnt array
+    pub syscall_cnt: [u32; MAX_SYSCALL_NUM],
+
+    /// Task start up time
+    pub start_up_time: TimeVal,
+
+    pub proc_prio: usize,
+    /// process's priocity
+
+    /// process's stride
+    pub proc_stride: usize,
 }
 
 impl TaskControlBlockInner {
+    /// get the trap context
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         self.trap_cx_ppn.get_mut()
     }
+    /// get the user token
     pub fn get_user_token(&self) -> usize {
         self.memory_set.token()
     }
@@ -93,6 +119,19 @@ impl TaskControlBlockInner {
             self.fd_table.push(None);
             self.fd_table.len() - 1
         }
+    /// Update syscall counter array
+    pub fn update_syscall_cnt(&mut self, syscall_id: usize) {
+        self.syscall_cnt[syscall_id] += 1;
+    }
+    /// Get process status
+    pub fn get_task_info(&self) -> TaskInfo {
+        let mut time_now = TimeVal::default();
+        kernel_get_time(&mut time_now as *mut TimeVal, usize::default());
+        TaskInfo::new(
+            self.task_status,
+            self.syscall_cnt.clone(),
+            time_now - self.start_up_time.clone(),
+        )
     }
 }
 
@@ -120,7 +159,7 @@ impl TaskControlBlock {
                     trap_cx_ppn,
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                    task_status: TaskStatus::Ready,
+                    task_status: TaskStatus::UnInit,
                     memory_set,
                     parent: None,
                     children: Vec::new(),
@@ -135,6 +174,10 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    syscall_cnt: [0; MAX_SYSCALL_NUM],
+                    start_up_time: TimeVal::default(),
+                    proc_prio: 16,
+                    proc_stride: 0,
                 })
             },
         };
@@ -165,6 +208,8 @@ impl TaskControlBlock {
         inner.memory_set = memory_set;
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
+        // initialize base_size
+        inner.base_size = user_sp;
         // initialize trap_cx
         let trap_cx = TrapContext::app_init_context(
             entry_point,
@@ -208,7 +253,7 @@ impl TaskControlBlock {
                     trap_cx_ppn,
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                    task_status: TaskStatus::Ready,
+                    task_status: TaskStatus::UnInit,
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -216,6 +261,10 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    syscall_cnt: parent_inner.syscall_cnt.clone(), // 这里在逻辑上是继承父进程的系统调用数量统计还是覆盖？
+                    start_up_time: TimeVal::default(),
+                    proc_prio: 16,
+                    proc_stride: 0,
                 })
             },
         });
@@ -229,6 +278,21 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// spawn a new process by elf_data provided by user
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let spawn_task_control_block = Arc::new(TaskControlBlock::new(elf_data));
+
+        let mut parent_inner = self.inner_exclusive_access();
+        parent_inner.children.push(spawn_task_control_block.clone());
+
+        let mut inner = spawn_task_control_block.inner_exclusive_access();
+        inner.parent = Some(Arc::downgrade(self));
+
+        drop(inner); // 这里为什么当时要写drop?
+                     // return
+        spawn_task_control_block
     }
 
     /// get pid of process
